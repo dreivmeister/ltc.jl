@@ -13,7 +13,7 @@ struct FullyConnected
     sensory_adjacency_matrix::Matrix{Int32}
 end
 
-function FullyConnected(units::Int, input_dim::Int, output_dim::Int=nothing)
+function FullyConnected(units::Int64, input_dim::Int64, output_dim=nothing)
     if isnothing(output_dim)
         output_dim = units
     end
@@ -106,13 +106,13 @@ function LTCCell(wiring, in_features)
                    randn(wiring.input_dim, wiring.units),
                    randn(wiring.input_dim, wiring.units),
                    abs.(wiring.sensory_adjacency_matrix),
-                   copy(a.sensory_adjacency_matrix),
+                   copy(wiring.sensory_adjacency_matrix),
                    randn(wiring.units),
                    randn(wiring.units, wiring.units),
                    randn(wiring.units,wiring.units),
                    randn(wiring.units,wiring.units),
                    abs.(wiring.adjacency_matrix),
-                   copy(a.adjacency_matrix),
+                   copy(wiring.adjacency_matrix),
                    randn(wiring.units))
 end
 # makes trainable
@@ -146,8 +146,8 @@ struct LTC
 end
 # constructor
 # TODO: what type is input_dim and is input_size == input_dim??
-function LTC(input_size::Int, units::Int, input_dim)
-    wiring = FullyConnected(units, input_dim)
+function LTC(input_size::Int, units::Int)
+    wiring = FullyConnected(units, input_size)
     return LTC(input_size, units, wiring, LTCCell(wiring, input_size))
 end
 # forward pass
@@ -168,3 +168,7 @@ function (a::LTC)(input, hx=nothing)
     end
     return h_out, h_state
 end
+
+ltc = LTC(2, 5)
+input = rand(10, 2, 3)
+ltc(input)
