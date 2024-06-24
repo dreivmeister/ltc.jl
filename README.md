@@ -1,2 +1,2 @@
 # ltc.jl
-Liquid Time-constant Networks in Julia
+Liquid Time-constant Networks in Julia (WIP)
