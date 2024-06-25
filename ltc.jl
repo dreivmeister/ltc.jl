@@ -40,46 +40,30 @@ end
 function _sigmoid(v_pre, mu, sigma, t)
     v_pre = Flux.unsqueeze(v_pre, ndims(v_pre)+1)
     mu = Flux.unsqueeze(mu, 1)
-    println("vpre", size(v_pre), " ", "mu", size(mu))
     mues = v_pre .- mu
-    println("mues", size(mues))
     sigma = Flux.unsqueeze(sigma, 1)
     x = sigma .* mues
-    println("x", size(x))
     return Flux.sigmoid(x)
 end
 
 function ode_solve(a, input, h_state, ts)
     #dh_state/dt = f(h_state, input, t)
     input = input'
-    print("input", size(input), "state", size(h_state))
-    ode_unfolds = 6
     v_pre = h_state
 
-    # (2, 5) * (3, 2, 5)
     sensory_w_activation = Flux.unsqueeze(a.sensory_w, dims=1) .* _sigmoid(input, a.sensory_mu, a.sensory_sigma, false)
-    print("senswact", size(sensory_w_activation))
-    # (3, 2, 5) *= (2, 5)
     sensory_w_activation .*= Flux.unsqueeze(a.sensory_spars_mask, dims=1)
-    print("senswact", size(sensory_w_activation))
 
-    # (3, 2, 5) .* (2, 5)
     sensory_rev_activation = sensory_w_activation .* Flux.unsqueeze(a.sensory_erev, dims=1)
-    print("sensrevact", size(sensory_rev_activation))
 
-    # (3, 2, 5) -> (3, 5)
     w_numerator_sensory = dropdims(sum(sensory_rev_activation, dims=2), dims=2)
-    println("wnumsens", size(w_numerator_sensory))
     w_denominator_sensory = dropdims(sum(sensory_w_activation, dims=2), dims=2)
-    println("wdenomsens", size(w_denominator_sensory))
 
-    cm_t = a.cm ./ (ts / ode_unfolds)
+    cm_t = a.cm ./ (ts / a.ode_unfolds)
 
     w_param = copy(a.w)
-    for t in 1:ode_unfolds
-        # (5, 5) .* (3, 5, 5)
+    for t in 1:a.ode_unfolds
         w_activation = Flux.unsqueeze(w_param, dims=1) .* _sigmoid(v_pre, a.mu, a.sigma, false)
-        # (3, 5, 5) *= (5,5)
         w_activation .*= Flux.unsqueeze(a.spars_mask, dims=1)
         rev_activation = w_activation .* Flux.unsqueeze(a.erev, dims=1)
         w_numerator = dropdims(sum(rev_activation, dims=2), dims=2) .+ w_numerator_sensory
@@ -97,7 +81,7 @@ end
 
 struct LTCCell
     wiring
-    in_features
+    ode_unfolds
     input_w
     input_b
     output_w
@@ -117,8 +101,8 @@ struct LTCCell
     vleak
 end
 
-function LTCCell(wiring, in_features)
-    return LTCCell(wiring, in_features, 
+function LTCCell(wiring; ode_unfolds=6)
+    return LTCCell(wiring, ode_unfolds, 
                    ones(wiring.input_dim), zeros(wiring.input_dim),
                    ones(wiring.output_dim), zeros(wiring.output_dim),
                    randn(wiring.input_dim, wiring.units),
@@ -135,15 +119,18 @@ function LTCCell(wiring, in_features)
                    randn(wiring.units),
                    randn(wiring.units))
 end
+# TODO: may need better init of params
+
 # makes trainable
 Flux.@functor LTCCell
+
 # forward pass
 function (a::LTCCell)(input, h_state, ts=1.0)
-    # input (C, B), h_state (B, units), ts float
+
     # map_inputs
     input = a.input_w .* input .+ a.input_b
 
-
+    # main step
     next_state = ode_solve(a, input, h_state, ts)
 
     # map_outputs
@@ -151,7 +138,6 @@ function (a::LTCCell)(input, h_state, ts=1.0)
     if a.wiring.output_dim < a.wiring.units
         output = output[:, 1:a.wiring.output_dim]
     end
-    # (5,) * (3, 5) * (5,)
     output = Flux.unsqueeze(a.output_w, dims=1) .* output .+ Flux.unsqueeze(a.output_b, dims=1)
 
     return output, next_state
@@ -165,17 +151,16 @@ struct LTC
     wiring # for now only fully connected
     rnn_cell
 end
+
 # constructor
-# TODO: what type is input_dim and is input_size == input_dim??
 function LTC(input_size::Int, units::Int)
     wiring = FullyConnected(units, input_size)
-    return LTC(input_size, units, wiring, LTCCell(wiring, input_size))
+    return LTC(input_size, units, wiring, LTCCell(wiring))
 end
+
 # forward pass
 function (a::LTC)(input, hx=nothing; return_seq=false)
-    #TODO: hx is assumed to be nothing right now!!
-    # input is of shape (seq_length, input_size, batch_size)
-    # (B, L, C) or (L, B, C) and we have (L, C, B)
+    #TODO: hx is assumed to be nothing right now i.e. not handled
     seq_length, input_size, batch_size = size(input)
     h_state = zeros(batch_size, a.units) # (B, U)
     h_out = zeros(batch_size, a.units) # (U,)
@@ -195,10 +180,15 @@ function (a::LTC)(input, hx=nothing; return_seq=false)
     return h_out', h_state'
 end
 
-ltc = LTC(2, 5) # (C, U)
 
-input = rand(10, 2, 3) # (L, C, B) # batch dimension is the last
-out, state = ltc(input; return_seq=true) # (L, U, B), (U, B) -> (10, 5, 3), (5, 3)
-println(size(out), " ", size(state)) # here also batch dimension is the last
+input_dimension = 2
+num_units = 5 # output_dimension = num_units
+time_length = 1
+batch_size = 3
 
-# with return_seq=true: (10, 5, 3), (5, 3)
+ltc = LTC(input_dimension, num_units)
+
+input = rand(time_length, input_dimension, batch_size)
+out, state = ltc(input; return_seq=true)
+println(size(out), " ", size(state)) # expect: if return_seq==false: (num_units, batch_size) and (num_units, batch_size)
+                                     #         else (time_length, num_units, batch_size) and (num_units, batch_size)
