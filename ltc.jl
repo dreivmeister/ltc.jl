@@ -37,39 +37,69 @@ function FullyConnected(units::Int64, input_dim::Int64, output_dim=nothing)
     return FullyConnected(units, input_dim, output_dim, adj_matrix, sens_adj_matrix)
 end
 
-function _sigmoid(v_pre, mu, sigma)
-    #v_pre = Flux.unsqueeze(v_pre, ndims(v_pre)+1)
+function _sigmoid(v_pre, mu, sigma, t)
+    v_pre = Flux.unsqueeze(v_pre, ndims(v_pre)+1)
+    mu = Flux.unsqueeze(mu, 1)
+    println("vpre", size(v_pre), " ", "mu", size(mu))
     mues = v_pre .- mu
+    println("mues", size(mues))
+    sigma = Flux.unsqueeze(sigma, 1)
     x = sigma .* mues
+    println("x", size(x))
     return Flux.sigmoid(x)
 end
 
 function ode_solve(a, input, h_state, ts)
     #dh_state/dt = f(h_state, input, t)
+    input = input'
+    print("input", size(input), "state", size(h_state))
     ode_unfolds = 6
     v_pre = h_state
 
-    sensory_w_activation = a.sensory_w .* _sigmoid(input, a.sensory_mu, a.sensory_sigma)
-    sensory_w_activation .*= a.sensory_spars_mask
+    # (2, 5) * (3, 2, 5)
+    sensory_w_activation = Flux.unsqueeze(a.sensory_w, dims=1) .* _sigmoid(input, a.sensory_mu, a.sensory_sigma, false)
+    print("senswact", size(sensory_w_activation))
+    # (3, 2, 5) *= (2, 5)
+    sensory_w_activation .*= Flux.unsqueeze(a.sensory_spars_mask, dims=1)
+    print("senswact", size(sensory_w_activation))
 
-    sensory_rev_activation = sensory_w_activation .* a.sensory_erev
+    # (3, 2, 5) .* (2, 5)
+    sensory_rev_activation = sensory_w_activation .* Flux.unsqueeze(a.sensory_erev, dims=1)
+    print("sensrevact", size(sensory_rev_activation))
 
-    w_numerator_sensory = sum(sensory_rev_activation, dims=2)
-    w_denominator_sensory = sum(sensory_w_activation, dims=2)
+    # (3, 2, 5) -> (3, 5)
+    w_numerator_sensory = dropdims(sum(sensory_rev_activation, dims=2), dims=2)
+    println("wnumsens", size(w_numerator_sensory))
+    w_denominator_sensory = dropdims(sum(sensory_w_activation, dims=2), dims=2)
+    println("wdenomsens", size(w_denominator_sensory))
 
     cm_t = a.cm ./ (ts / ode_unfolds)
+    print("cm_t", size(cm_t))
 
     w_param = copy(a.w)
     for t in 1:ode_unfolds
-        w_activation = w_param .* _sigmoid(v_pre, a.mu, a.sigma)
-        w_activation .*= a.spars_mask
-        rev_activation = w_activation .* a.erev
-        w_numerator = sum(rev_activation, dims=2) .+ w_numerator_sensory
-        w_denominator = sum(w_activation, dims=2) .+ w_denominator_sensory
+        # (5, 5) .* (3, 5, 5)
+        println("sig", size(_sigmoid(v_pre, a.mu, a.sigma, false)))
+        w_activation = Flux.unsqueeze(w_param, dims=1) .* _sigmoid(v_pre, a.mu, a.sigma, false)
+        println("wact", size(w_activation))
+        # (3, 5, 5) *= (5,5)
+        w_activation .*= Flux.unsqueeze(a.spars_mask, dims=1)
+        println("wact", size(w_activation))
+        rev_activation = w_activation .* Flux.unsqueeze(a.erev, dims=1)
+        print("revact", size(rev_activation))
+        w_numerator = dropdims(sum(rev_activation, dims=2), dims=2) .+ w_numerator_sensory
+        print("wnum", size(w_numerator))
+        w_denominator = dropdims(sum(w_activation, dims=2), dims=2) .+ w_denominator_sensory
+        print("wdenom", size(w_denominator))
 
         gleak = a.gleak
-        numerator = cm_t .* v_pre .+ gleak .* a.vleak .+ w_numerator
-        denominator = cm_t .+ gleak .+ w_denominator
+        print("gleak", size(gleak))
+                    # 1 * (3, 5) * (5,) * (5,) + (3, 5)
+        print("cm", size(cm_t), "vpre", size(v_pre), "gleak", size(gleak), "vleak", size(a.vleak), "wnum", size(w_numerator))
+        numerator = Flux.unsqueeze(cm_t, dims=1) .* v_pre .+ Flux.unsqueeze(gleak, dims=1) .* Flux.unsqueeze(a.vleak, dims=1) .+ w_numerator
+        print("num", size(numerator))
+        denominator = Flux.unsqueeze(cm_t, dims=1) .+ Flux.unsqueeze(gleak, dims=1) .+ w_denominator
+        print("denom", size(denominator))
 
         v_pre = numerator ./ (denominator .+ 1e-8)
     end
@@ -96,6 +126,7 @@ struct LTCCell
     spars_mask
     erev
     gleak
+    vleak
 end
 
 function LTCCell(wiring, in_features)
@@ -109,10 +140,11 @@ function LTCCell(wiring, in_features)
                    copy(wiring.sensory_adjacency_matrix),
                    randn(wiring.units),
                    randn(wiring.units, wiring.units),
-                   randn(wiring.units,wiring.units),
-                   randn(wiring.units,wiring.units),
+                   randn(wiring.units, wiring.units),
+                   randn(wiring.units, wiring.units),
                    abs.(wiring.adjacency_matrix),
                    copy(wiring.adjacency_matrix),
+                   randn(wiring.units),
                    randn(wiring.units))
 end
 # makes trainable
@@ -129,9 +161,12 @@ function (a::LTCCell)(input, h_state, ts=1.0)
     # map_outputs
     output = copy(next_state)
     if a.wiring.output_dim < a.wiring.units
+        println("odim", a.wiring.output_dim, "units", a.wiring.units, "out", size(output))
         output = output[:, 1:a.wiring.output_dim]
     end
-    output = a.output_w .* output .+ a.output_b
+    print("out", size(output))
+    # (5,) * (3, 5) * (5,)
+    output = Flux.unsqueeze(a.output_w, dims=1) .* output .+ Flux.unsqueeze(a.output_b, dims=1)
 
     return output, next_state
 end
@@ -156,8 +191,8 @@ function (a::LTC)(input, hx=nothing)
     # input is of shape (seq_length, input_size, batch_size)
     # (B, L, C) or (L, B, C) and we have (L, C, B)
     seq_length, input_size, batch_size = size(input)
-    h_state = zeros(batch_size, a.units)
-    h_out = zeros(a.units)
+    h_state = zeros(batch_size, a.units) # (B, U)
+    h_out = zeros(a.units) # (U,)
 
     #output_sequence = []
     for t in 1:seq_length
@@ -169,6 +204,8 @@ function (a::LTC)(input, hx=nothing)
     return h_out, h_state
 end
 
-ltc = LTC(2, 5)
-input = rand(10, 2, 3)
-ltc(input)
+ltc = LTC(2, 5) # (C, U)
+
+input = rand(10, 2, 3) # (L, C, B)
+out, state = ltc(input) # (L, U, B), (U, B) -> (10, 5, 3), (5, 3)
+println(size(out), " ", size(state))
