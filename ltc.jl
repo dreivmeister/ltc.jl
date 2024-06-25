@@ -74,32 +74,20 @@ function ode_solve(a, input, h_state, ts)
     println("wdenomsens", size(w_denominator_sensory))
 
     cm_t = a.cm ./ (ts / ode_unfolds)
-    print("cm_t", size(cm_t))
 
     w_param = copy(a.w)
     for t in 1:ode_unfolds
         # (5, 5) .* (3, 5, 5)
-        println("sig", size(_sigmoid(v_pre, a.mu, a.sigma, false)))
         w_activation = Flux.unsqueeze(w_param, dims=1) .* _sigmoid(v_pre, a.mu, a.sigma, false)
-        println("wact", size(w_activation))
         # (3, 5, 5) *= (5,5)
         w_activation .*= Flux.unsqueeze(a.spars_mask, dims=1)
-        println("wact", size(w_activation))
         rev_activation = w_activation .* Flux.unsqueeze(a.erev, dims=1)
-        print("revact", size(rev_activation))
         w_numerator = dropdims(sum(rev_activation, dims=2), dims=2) .+ w_numerator_sensory
-        print("wnum", size(w_numerator))
         w_denominator = dropdims(sum(w_activation, dims=2), dims=2) .+ w_denominator_sensory
-        print("wdenom", size(w_denominator))
 
         gleak = a.gleak
-        print("gleak", size(gleak))
-                    # 1 * (3, 5) * (5,) * (5,) + (3, 5)
-        print("cm", size(cm_t), "vpre", size(v_pre), "gleak", size(gleak), "vleak", size(a.vleak), "wnum", size(w_numerator))
         numerator = Flux.unsqueeze(cm_t, dims=1) .* v_pre .+ Flux.unsqueeze(gleak, dims=1) .* Flux.unsqueeze(a.vleak, dims=1) .+ w_numerator
-        print("num", size(numerator))
         denominator = Flux.unsqueeze(cm_t, dims=1) .+ Flux.unsqueeze(gleak, dims=1) .+ w_denominator
-        print("denom", size(denominator))
 
         v_pre = numerator ./ (denominator .+ 1e-8)
     end
@@ -161,10 +149,8 @@ function (a::LTCCell)(input, h_state, ts=1.0)
     # map_outputs
     output = copy(next_state)
     if a.wiring.output_dim < a.wiring.units
-        println("odim", a.wiring.output_dim, "units", a.wiring.units, "out", size(output))
         output = output[:, 1:a.wiring.output_dim]
     end
-    print("out", size(output))
     # (5,) * (3, 5) * (5,)
     output = Flux.unsqueeze(a.output_w, dims=1) .* output .+ Flux.unsqueeze(a.output_b, dims=1)
 
@@ -186,26 +172,33 @@ function LTC(input_size::Int, units::Int)
     return LTC(input_size, units, wiring, LTCCell(wiring, input_size))
 end
 # forward pass
-function (a::LTC)(input, hx=nothing)
+function (a::LTC)(input, hx=nothing; return_seq=false)
     #TODO: hx is assumed to be nothing right now!!
     # input is of shape (seq_length, input_size, batch_size)
     # (B, L, C) or (L, B, C) and we have (L, C, B)
     seq_length, input_size, batch_size = size(input)
     h_state = zeros(batch_size, a.units) # (B, U)
-    h_out = zeros(a.units) # (U,)
+    h_out = zeros(batch_size, a.units) # (U,)
 
-    #output_sequence = []
+    output_sequence = []
     for t in 1:seq_length
         inputs = input[t,:,:] # (C, B)
         ts = 1.0
         h_out, h_state = a.rnn_cell(inputs, h_state, ts)
-        #push!(output_sequence, h_out)
+        if return_seq
+            push!(output_sequence, h_out')
+        end
     end
-    return h_out, h_state
+    if return_seq
+        return stack(output_sequence, dims=1), h_state'
+    end
+    return h_out', h_state'
 end
 
 ltc = LTC(2, 5) # (C, U)
 
-input = rand(10, 2, 3) # (L, C, B)
-out, state = ltc(input) # (L, U, B), (U, B) -> (10, 5, 3), (5, 3)
-println(size(out), " ", size(state))
+input = rand(10, 2, 3) # (L, C, B) # batch dimension is the last
+out, state = ltc(input; return_seq=true) # (L, U, B), (U, B) -> (10, 5, 3), (5, 3)
+println(size(out), " ", size(state)) # here also batch dimension is the last
+
+# with return_seq=true: (10, 5, 3), (5, 3)
